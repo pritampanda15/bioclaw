@@ -1,0 +1,14 @@
+# BioClaw Configuration
+model: claude-sonnet-4-5-20250929
+max_tool_rounds: 15
+data_dir: ./bioclaw_data
+
+server:
+  host: 127.0.0.1
+  port: 8000
+
+tools:
+  enabled_categories:
+    - drugdiscovery
+    - ngs
+    - common
