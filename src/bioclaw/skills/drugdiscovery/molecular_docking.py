@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import tempfile
 from pathlib import Path
 
 from bioclaw.config.settings import get_settings
 from bioclaw.skills.base import BaseTool
+from bioclaw.skills.drugdiscovery.pdb_converter import clean_pdb, pdb_string_to_pdbqt
 from bioclaw.skills.types import ParameterType, ToolMetadata, ToolParameter, ToolResult
 from bioclaw.utils.logging import get_logger
 
@@ -23,7 +23,9 @@ class MolecularDockingTool(BaseTool):
             description=(
                 "Perform molecular docking of a ligand into a receptor binding site using "
                 "AutoDock Vina. Accepts a ligand SMILES string (converted to PDBQT via Meeko) "
-                "and a receptor PDBQT file path. Returns binding affinity scores and docked poses."
+                "and a receptor file (PDB or PDBQT). PDB files are automatically cleaned "
+                "(waters, ions, ligands removed) and converted to PDBQT. "
+                "Returns binding affinity scores and docked poses."
             ),
             parameters=[
                 ToolParameter(
@@ -32,9 +34,9 @@ class MolecularDockingTool(BaseTool):
                     description="SMILES string of the ligand molecule",
                 ),
                 ToolParameter(
-                    name="receptor_pdbqt",
+                    name="receptor_file",
                     type=ParameterType.STRING,
-                    description="Path to the receptor PDBQT file",
+                    description="Path to the receptor file (PDB or PDBQT format)",
                 ),
                 ToolParameter(
                     name="center_x",
@@ -78,6 +80,27 @@ class MolecularDockingTool(BaseTool):
                     description="Exhaustiveness of the search (higher = more thorough but slower)",
                     required=False,
                     default=8,
+                ),
+                ToolParameter(
+                    name="remove_waters",
+                    type=ParameterType.BOOLEAN,
+                    description="Remove water molecules when converting PDB to PDBQT",
+                    required=False,
+                    default=True,
+                ),
+                ToolParameter(
+                    name="remove_ligands",
+                    type=ParameterType.BOOLEAN,
+                    description="Remove non-protein ligands when converting PDB to PDBQT",
+                    required=False,
+                    default=True,
+                ),
+                ToolParameter(
+                    name="remove_ions",
+                    type=ParameterType.BOOLEAN,
+                    description="Remove common ions when converting PDB to PDBQT",
+                    required=False,
+                    default=True,
                 ),
             ],
             category="drugdiscovery",
@@ -153,9 +176,33 @@ class MolecularDockingTool(BaseTool):
                 break
         return modes
 
+    def _prepare_receptor(
+        self,
+        receptor_path: Path,
+        output_dir: Path,
+        *,
+        remove_waters: bool = True,
+        remove_ligands: bool = True,
+        remove_ions: bool = True,
+    ) -> Path:
+        """Convert a PDB receptor to PDBQT format, cleaning it first.
+
+        Returns the path to the PDBQT file ready for docking.
+        """
+        cleaned_pdb = clean_pdb(
+            receptor_path,
+            remove_waters=remove_waters,
+            remove_ligands=remove_ligands,
+            remove_ions=remove_ions,
+        )
+        pdbqt_string = pdb_string_to_pdbqt(cleaned_pdb)
+        pdbqt_path = output_dir / f"{receptor_path.stem}_clean.pdbqt"
+        pdbqt_path.write_text(pdbqt_string)
+        return pdbqt_path
+
     async def execute(self, **kwargs) -> ToolResult:
         ligand_smiles: str = kwargs["ligand_smiles"]
-        receptor_pdbqt: str = kwargs["receptor_pdbqt"]
+        receptor_file: str = kwargs["receptor_file"]
         center_x: float = kwargs["center_x"]
         center_y: float = kwargs["center_y"]
         center_z: float = kwargs["center_z"]
@@ -163,19 +210,41 @@ class MolecularDockingTool(BaseTool):
         size_y: float = kwargs.get("size_y", 20)
         size_z: float = kwargs.get("size_z", 20)
         exhaustiveness: int = kwargs.get("exhaustiveness", 8)
+        remove_waters: bool = kwargs.get("remove_waters", True)
+        remove_ligands: bool = kwargs.get("remove_ligands", True)
+        remove_ions: bool = kwargs.get("remove_ions", True)
 
         # Validate receptor file exists
-        receptor_path = Path(receptor_pdbqt)
+        receptor_path = Path(receptor_file)
         if not receptor_path.exists():
             return ToolResult(
                 success=False,
-                error=f"Receptor file not found: {receptor_pdbqt}",
-                summary=f"Receptor PDBQT file does not exist: {receptor_pdbqt}",
+                error=f"Receptor file not found: {receptor_file}",
+                summary=f"Receptor file does not exist: {receptor_file}",
             )
 
         settings = get_settings()
         output_dir = settings.data_dir / "docking"
         output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Auto-convert PDB to PDBQT if needed
+        if receptor_path.suffix.lower() == ".pdb":
+            try:
+                logger.info(f"Converting PDB receptor to PDBQT: {receptor_path}")
+                receptor_path = self._prepare_receptor(
+                    receptor_path,
+                    output_dir,
+                    remove_waters=remove_waters,
+                    remove_ligands=remove_ligands,
+                    remove_ions=remove_ions,
+                )
+                logger.info(f"Receptor PDBQT saved to: {receptor_path}")
+            except Exception as e:
+                return ToolResult(
+                    success=False,
+                    error=f"Receptor PDB to PDBQT conversion failed: {e}",
+                    summary=f"Could not convert receptor PDB to PDBQT: {e}",
+                )
 
         try:
             with tempfile.TemporaryDirectory() as tmpdir:

@@ -52,6 +52,9 @@ bioclaw = "bioclaw.cli.app:cli"
 [tool.hatch.build.targets.wheel]
 packages = ["src/bioclaw"]
 
+# System binaries (not installable via pip):
+# conda install -c conda-forge -c bioconda vina samtools bcftools fastqc hisat2 subread gemmi
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
